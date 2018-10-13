@@ -6,6 +6,7 @@ var rangeParser = require('range-parser'),
   express = require('express'),
   multipart = require('connect-multiparty'),
   fs = require('fs'),
+  archiver = require('archiver'),
   store = require('./store'),
   progress = require('./progressbar'),
   stats = require('./stats'),
@@ -29,6 +30,7 @@ function serialize(torrent) {
   return {
     infoHash: torrent.infoHash,
     name: torrent.torrent.name,
+    length: torrent.torrent.length,
     interested: torrent.amInterested,
     ready: torrent.ready,
     files: torrent.files.map(function (f) {
@@ -86,7 +88,9 @@ api.post('/upload', multipart(), function (req, res) {
     } else {
       res.send({ infoHash: infoHash });
     }
-    fs.unlink(file.path);
+    fs.unlink(file.path, function (err) {
+      console.error(err);
+    });
   });
 });
 
@@ -139,10 +143,13 @@ api.get('/torrents/:infoHash/stats', findTorrent, function (req, res) {
 
 api.get('/torrents/:infoHash/files', findTorrent, function (req, res) {
   var torrent = req.torrent;
+  var proto = req.get('x-forwarded-proto') || req.protocol;
+  var host = req.get('x-forwarded-host') || req.get('host');
   res.setHeader('Content-Type', 'application/x-mpegurl; charset=utf-8');
+  res.attachment(torrent.torrent.name + '.m3u');
   res.send('#EXTM3U\n' + torrent.files.map(function (f) {
       return '#EXTINF:-1,' + f.path + '\n' +
-        req.protocol + '://' + req.get('host') + '/torrents/' + torrent.infoHash + '/files/' + encodeURIComponent(f.path);
+        proto + '://' + host + '/torrents/' + torrent.infoHash + '/files/' + encodeURIComponent(f.path);
     }).join('\n'));
 });
 
@@ -179,6 +186,28 @@ api.all('/torrents/:infoHash/files/:path([^"]+)', findTorrent, function (req, re
     return res.end();
   }
   pump(file.createReadStream(range), res);
+});
+
+api.get('/torrents/:infoHash/archive', findTorrent, function (req, res) {
+  var torrent = req.torrent;
+
+  res.attachment(torrent.torrent.name + '.zip');
+  req.connection.setTimeout(3600000);
+
+  var archive = archiver('zip');
+  archive.on('warning', function (err) {
+    console.error(err);
+  });
+  archive.on('error', function (err) {
+    throw err;
+  });
+
+  pump(archive, res);
+
+  torrent.files.forEach(function (f) {
+    archive.append(f.createReadStream(), { name: f.path });
+  });
+  archive.finalize();
 });
 
 module.exports = api;
